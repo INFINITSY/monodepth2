@@ -15,9 +15,10 @@ from torch.utils.data import DataLoader
 from layers import transformation_from_parameters
 from utils import readlines
 from options import MonodepthOptions
-from datasets import KITTIOdomDataset
+from datasets import KITTIOdomDataset, KITTIRAWDataset
 import networks
 
+splits_dir = os.path.join(os.path.dirname(__file__), "splits")
 
 # from https://github.com/tinghuiz/SfMLearner
 def dump_xyz(source_to_target_transformations):
@@ -49,35 +50,53 @@ def compute_ate(gtruth_xyz, pred_xyz_o):
 def evaluate(opt):
     """Evaluate odometry on the KITTI dataset
     """
+
+    device = torch.device("cpu")
+
+    opt.load_weights_folder = "./models/mono_640x192"
     assert os.path.isdir(opt.load_weights_folder), \
         "Cannot find a folder at {}".format(opt.load_weights_folder)
 
-    assert opt.eval_split == "odom_9" or opt.eval_split == "odom_10", \
-        "eval_split should be either odom_9 or odom_10"
+#    assert opt.eval_split == "odom_9" or opt.eval_split == "odom_10", \
+#        "eval_split should be either odom_9 or odom_10"
 
-    sequence_id = int(opt.eval_split.split("_")[1])
+    #sequence_id = int(opt.eval_split.split("_")[1])
 
-    filenames = readlines(
-        os.path.join(os.path.dirname(__file__), "splits", "odom",
-                     "test_files_{:02d}.txt".format(sequence_id)))
+    #filenames = readlines(
+    #    os.path.join(os.path.dirname(__file__), "splits", "odom",
+    #                 "test_files_{:02d}.txt".format(sequence_id)))
+    filenames = readlines(os.path.join(splits_dir, opt.eval_split, "test.txt"))
 
-    dataset = KITTIOdomDataset(opt.data_path, filenames, opt.height, opt.width,
-                               [0, 1], 4, is_train=False)
-    dataloader = DataLoader(dataset, opt.batch_size, shuffle=False,
-                            num_workers=opt.num_workers, pin_memory=True, drop_last=False)
-
+    #dataset = KITTIOdomDataset(opt.data_path, filenames, opt.height, opt.width,
+    #                           [0, 1], 4, is_train=False)
     pose_encoder_path = os.path.join(opt.load_weights_folder, "pose_encoder.pth")
     pose_decoder_path = os.path.join(opt.load_weights_folder, "pose.pth")
+    encoder_dict = torch.load(pose_encoder_path, map_location=device)
+
+    opt.data_path = "/Users/infinitsy/KITTI/raw_data"
+
+    dataset = KITTIRAWDataset(opt.data_path, filenames,
+                              opt.height, opt.width,
+                              [0, 1], 4, is_train=False)
+    opt.num_workers = 0
+    dataloader = DataLoader(dataset, 16, shuffle=False, num_workers=opt.num_workers,
+                            pin_memory=True, drop_last=False)
+
+
+    #dataloader = DataLoader(dataset, opt.batch_size, shuffle=False,
+    #                        num_workers=opt.num_workers, pin_memory=True, drop_last=False)
+
+
 
     pose_encoder = networks.ResnetEncoder(opt.num_layers, False, 2)
-    pose_encoder.load_state_dict(torch.load(pose_encoder_path))
+    pose_encoder.load_state_dict(encoder_dict)
 
     pose_decoder = networks.PoseDecoder(pose_encoder.num_ch_enc, 1, 2)
-    pose_decoder.load_state_dict(torch.load(pose_decoder_path))
+    pose_decoder.load_state_dict(torch.load(pose_decoder_path, map_location=device))
 
-    pose_encoder.cuda()
+    pose_encoder.to(device)
     pose_encoder.eval()
-    pose_decoder.cuda()
+    pose_decoder.to(device)
     pose_decoder.eval()
 
     pred_poses = []
@@ -89,9 +108,9 @@ def evaluate(opt):
     with torch.no_grad():
         for inputs in dataloader:
             for key, ipt in inputs.items():
-                inputs[key] = ipt.cuda()
+                inputs[key] = ipt.to(device)
 
-            all_color_aug = torch.cat([inputs[("color_aug", i, 0)] for i in opt.frame_ids], 1)
+            all_color_aug = torch.cat([inputs[("color", i, 0)] for i in opt.frame_ids], 1)
 
             features = [pose_encoder(all_color_aug)]
             axisangle, translation = pose_decoder(features)
@@ -100,7 +119,7 @@ def evaluate(opt):
                 transformation_from_parameters(axisangle[:, 0], translation[:, 0]).cpu().numpy())
 
     pred_poses = np.concatenate(pred_poses)
-
+    '''
     gt_poses_path = os.path.join(opt.data_path, "poses", "{:02d}.txt".format(sequence_id))
     gt_global_poses = np.loadtxt(gt_poses_path).reshape(-1, 3, 4)
     gt_global_poses = np.concatenate(
@@ -123,7 +142,7 @@ def evaluate(opt):
         ates.append(compute_ate(gt_local_xyzs, local_xyzs))
 
     print("\n   Trajectory error: {:0.3f}, std: {:0.3f}\n".format(np.mean(ates), np.std(ates)))
-
+    '''
     save_path = os.path.join(opt.load_weights_folder, "poses.npy")
     np.save(save_path, pred_poses)
     print("-> Predictions saved to", save_path)
